@@ -5,7 +5,7 @@ import cors from 'cors';
 import { Boom } from '@hapi/boom';
 
 // ==========================================
-// 1. GLOBAL STATE & LOGGING (डैशबोर्ड के लिए)
+// 1. GLOBAL STATE & LOGGING
 // ==========================================
 let dashboardLogs = [];
 let latestOTP = "⏳ OTP जनरेट हो रहा है... कृपया रुकें।";
@@ -23,6 +23,25 @@ function addLog(msg) {
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ==========================================
+// 🎯 EXTRA SAFETY: फोन नंबर साफ़ करने का जादुई फ़ंक्शन
+// ==========================================
+const cleanPhone = (phone) => {
+    if (!phone) return "";
+    // सिर्फ नंबरों को रखें, बाकी सब (+, spaces, dashes) हटा दें
+    let cleaned = phone.toString().replace(/\D/g, ''); 
+    
+    // अगर नंबर 12 अंकों का है और 91 से शुरू हो रहा है, तो आगे से 91 हटा दें
+    if (cleaned.length === 12 && cleaned.startsWith('91')) {
+        cleaned = cleaned.slice(2);
+    }
+    // अगर नंबर 11 अंकों का है और 0 से शुरू हो रहा है, तो आगे से 0 हटा दें
+    if (cleaned.length === 11 && cleaned.startsWith('0')) {
+        cleaned = cleaned.slice(1);
+    }
+    return cleaned.trim();
+};
+
+// ==========================================
 // 2. WHATSAPP ENGINE (Baileys OTP Login)
 // ==========================================
 async function startBot() {
@@ -33,7 +52,7 @@ async function startBot() {
     const sock = makeWASocket({
         version,
         auth: state,
-        printQRInTerminal: false, // QR कोड बंद कर दिया
+        printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
         browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false
@@ -42,7 +61,6 @@ async function startBot() {
     globalSock = sock;
     sock.ev.on('creds.update', saveCreds);
 
-    // 🔴 यहाँ अपने बोट वाले सिम का 12 अंकों का नंबर (91 के साथ) डालें 🔴
     const BOT_PHONE_NUMBER = "917665561627"; 
 
     if (!sock.authState.creds.registered) {
@@ -81,12 +99,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 👉 डैशबोर्ड का डेटा भेजने के लिए
 app.get('/api/data', (req, res) => {
     res.json({ isConnected, latestOTP, logs: dashboardLogs });
 });
 
-// 👉 वेबसाइट का मेन डैशबोर्ड (यहाँ आपको OTP दिखेगा)
 app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
@@ -116,7 +132,6 @@ app.get('/', (req, res) => {
                 async function fetchData() {
                     const res = await fetch('/api/data');
                     const data = await res.json();
-                    
                     let statusHtml = '<p class="status">Status: ' + (data.isConnected ? '<span style="color:lime">🟢 ONLINE</span>' : '<span style="color:red">🔴 OFFLINE</span>') + '</p>';
                     if (!data.isConnected) {
                         statusHtml += '<p>व्हाट्सएप लॉगिन कोड:</p><div class="otp">' + data.latestOTP + '</div><p style="color:#aaa">अपने WhatsApp में जाएं -> Linked Devices -> Link with Phone Number में यह कोड डालें</p>';
@@ -124,7 +139,6 @@ app.get('/', (req, res) => {
                         statusHtml += '<p style="color:lime">✅ सिस्टम सफलतापूर्वक कनेक्टेड है</p>';
                     }
                     document.getElementById('status-container').innerHTML = statusHtml;
-
                     document.getElementById('logs-container').innerHTML = data.logs.slice().reverse().map(l => '<div class="log">' + l + '</div>').join('');
                 }
                 setInterval(fetchData, 3000);
@@ -135,60 +149,69 @@ app.get('/', (req, res) => {
     `);
 });
 
-// 👉 सिक्योर चैट रूम बनाने वाली API (जिससे InfinityFree वेबसाइट बात करेगी)
+// 👉 सिक्योर चैट रूम बनाने वाली मुख्य API
 app.post('/api/create-secure-connection', async (req, res) => {
     if (!globalSock || !isConnected) {
-        return res.status(500).json({ success: false, error: 'बोट अभी व्हाट्सएप से कनेक्ट नहीं है।' });
+        return res.status(500).json({ success: false, error: 'बोट अभी व्हाट्सएप से कनेक्ट नहीं है। कृपया डैशबोर्ड पर जाकर चेक करें।' });
     }
 
     const { userA_Phone, userB_Phone, matchId, userA_Name } = req.body;
     if (!userA_Phone || !userB_Phone || !matchId) {
-        return res.status(400).json({ success: false, error: 'डेटा अधूरा है!' });
+        return res.status(400).json({ success: false, error: 'डेटा अधूरा है! पैरामीटर्स मिसिंग हैं।' });
     }
 
     try {
-        // Baileys में नंबर का फॉर्मेट @s.whatsapp.net होता है
-        const participantA = `91${userA_Phone.trim()}@s.whatsapp.net`;
-        const participantB = `91${userB_Phone.trim()}@s.whatsapp.net`;
+        // 🎯 नंबरों को शुद्ध 10 अंकों का बनाना
+        const cleanA = cleanPhone(userA_Phone);
+        const cleanB = cleanPhone(userB_Phone);
+
+        // सुरक्षा जांच: अगर नंबर क्लीन करने के बाद भी 10 डिजिट का नहीं है
+        if (cleanA.length !== 10 || cleanB.length !== 10) {
+            addLog(`⚠️ अमान्य नंबर ब्लॉक किए गए: UserA: ${cleanA}, UserB: ${cleanB}`);
+            return res.status(400).json({ success: false, error: 'अमान्य फोन नंबर! नंबर सही फॉर्मेट में नहीं है।' });
+        }
+
+        const participantA = `91${cleanA}@s.whatsapp.net`;
+        const participantB = `91${cleanB}@s.whatsapp.net`;
         const groupName = `Secure Match #${matchId}`;
 
-        addLog(`⏳ [Match ${matchId}] के लिए सिक्योर रूम बनाया जा रहा है...`);
+        addLog(`⏳ [Match ${matchId}] के लिए सिक्योर रूम प्रोसेस चालू...`);
 
-        // 1. ग्रुप क्रिएट करना
+        // 1. व्हाट्सएप ग्रुप क्रिएट करना
         const group = await globalSock.groupCreate(groupName, [participantA, participantB]);
         const groupId = group.id;
         addLog(`✅ व्हाट्सएप ग्रुप बन गया। ID: ${groupId}`);
 
         await sleep(2000);
 
-        // 2. इन्वाइट लिंक निकालना
+        // 2. ग्रुप इन्वाइट लिंक जनरेट करना
         const inviteCode = await globalSock.groupInviteCode(groupId);
         const inviteLink = `https://chat.whatsapp.com/${inviteCode}`;
         
         await sleep(2000);
 
-        // 3. वेलकम मैसेज भेजना
-        await globalSock.sendMessage(groupId, { text: `👑 *Meena Dynasty Secure Connection*\n\nआपका प्राइवेट चैट रूम तैयार है। यहाँ आपकी प्राइवेसी 100% सुरक्षित है।` });
+        // 3. ग्रुप के अंदर ऑफिशियल वेलकम मैसेज भेजना
+        await globalSock.sendMessage(groupId, { text: `👑 *Meena Dynasty Secure Connection*\n\nआपका प्राइवेट चैट रूम तैयार है। यहाँ आपकी प्राइवेसी 100% सुरक्षित है। दोनों सदस्य बिना अपना नंबर शेयर किए यहाँ सुरक्षित बातचीत शुरू कर सकते हैं।` });
 
         await sleep(2000);
 
-        // 4. पर्सनल इनबॉक्स में अलर्ट और लिंक भेजना
+        // 4. दोनों को पर्सनल इनबॉक्स में अलर्ट मैसेज भेजना
         const alertMsg = `👑 *Meena Dynasty Alert:*\n\nआपको *${userA_Name ? userA_Name : 'एक यूजर'}* की तरफ से एक सिक्योर कनेक्शन रिक्वेस्ट मिली है।\n\nअपनी प्राइवेसी सुरक्षित रखते हुए बात शुरू करने के लिए नीचे दिए लिंक पर क्लिक करके अपना प्राइवेट रूम जॉइन करें:\n\n👉 ${inviteLink}`;
 
         await globalSock.sendMessage(participantA, { text: alertMsg });
-        addLog(`📩 User A (${userA_Phone}) को लिंक भेज दिया गया।`);
+        addLog(`📩 User A (${cleanA}) को पर्सनल लिंक भेज दिया गया।`);
         
-        await sleep(3000); // स्पैम बैन से बचने के लिए डिले
+        await sleep(3000); // व्हाट्सएप एंटी-बैन गैप
         
         await globalSock.sendMessage(participantB, { text: alertMsg });
-        addLog(`📩 User B (${userB_Phone}) को लिंक भेज दिया गया।`);
+        addLog(`📩 User B (${cleanB}) को पर्सनल लिंक भेज दिया गया।`);
 
-        // 5. वेबसाइट को रिस्पॉन्स देना
+        // 5. फ्रंटएंड वेबसाइट को सक्सेस रिस्पॉन्स भेजना
         return res.status(200).json({ success: true, inviteLink: inviteLink });
 
     } catch (error) {
-        addLog(`❌ [Match ${matchId}] एरर: ${error.message}`);
-        return res.status(500).json({ success: false, error: 'व्हाट्सएप ग्रुप बनाने में दिक्कत आई।' });
+        addLog(`❌ [Match ${matchId}] व्हाट्सएप सर्वर एरर: ${error.message}`);
+        return res.status(500).json({ success: false, error: `व्हाट्सएप ग्रुप बनाने में तकनीकी समस्या आई: ${error.message}` });
     }
 });
 
